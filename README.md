@@ -1,6 +1,6 @@
 # pi-smart-commit
 
-A [pi](https://github.com/mariozechner/pi-coding-agent) extension that replaces the built-in `commit` tool with a version that requires user review before committing.
+A [pi](https://github.com/earendil-works/pi) extension that replaces the built-in `commit` tool with a version that requires user review before committing.
 
 ## Install
 
