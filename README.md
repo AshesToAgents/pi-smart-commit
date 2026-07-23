@@ -6,13 +6,13 @@ A [pi](https://github.com/earendil-works/pi) extension that replaces the built-i
 
 ```bash
 # Global (user-level)
-pi install ssh://git@github.com/SunflowerFuchs/pi-smart-commit.git
+pi install ssh://git@github.com/AshesToAgents/pi-smart-commit.git
 
 # Project-level (shared with team via .pi/settings.json)
-pi install -l ssh://git@github.com/SunflowerFuchs/pi-smart-commit.git
+pi install -l ssh://git@github.com/AshesToAgents/pi-smart-commit.git
 
 # Try without installing
-pi -e ssh://git@github.com/SunflowerFuchs/pi-smart-commit.git
+pi -e ssh://git@github.com/AshesToAgents/pi-smart-commit.git
 ```
 
 ## What's Included
