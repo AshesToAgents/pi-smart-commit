@@ -31,7 +31,9 @@ When the agent wants to commit changes, this tool opens an editor with the propo
 Key behaviors:
 
 - **Requires explicit paths** — the agent must specify which files to commit. Staging everything is rejected.
+- **Repository selection** — pass `repo` (absolute or relative to the session directory) to commit in a different checkout, e.g. a nested repository. Defaults to the session directory. Paths are interpreted relative to the chosen repository.
 - **Diff summary** — shows a `git diff --stat` alongside the message for context.
+- **Repo confirmation** — when `repo` differs from the session directory, the review editor title and the commit result show the resolved repository path, so non-default commits stand out.
 - **Co-author trailer** — automatically appends a `Co-authored-by:` line with the model name.
 - **Smart staging** — skips re-staging files that are already staged (avoids errors on pre-staged deletions).
 - **Non-interactive fallback** — in headless mode (no TUI), commits directly without the editor prompt.
