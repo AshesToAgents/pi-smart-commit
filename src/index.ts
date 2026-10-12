@@ -7,7 +7,10 @@
  *   2. Save to commit, Escape to skip
  */
 
-import { resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -144,10 +147,105 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Commit
-		const commitResult = await pi.exec("git", ["commit", "-m", message], { cwd: repoDir, signal });
-		if (commitResult.code !== 0) {
-			throw new Error(`Commit failed: ${commitResult.stderr}`);
+		// Build the commit in a temporary index so unrelated staged changes remain in the real index.
+		// Copy selected entries from the real index rather than using `git commit --only`, which
+		// would commit unstaged working-tree content from partially staged selected files.
+		const headResult = await pi.exec("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+			cwd: repoDir,
+			signal,
+		});
+		const selectedDiff = await pi.exec(
+			"git",
+			[
+				"diff",
+				"--cached",
+				"--binary",
+				"--full-index",
+				"--no-ext-diff",
+				"--no-textconv",
+				"--no-color",
+				"--src-prefix=a/",
+				"--dst-prefix=b/",
+				...(headResult.code === 0 ? ["HEAD"] : []),
+				"--",
+				...paths,
+			],
+			{ cwd: repoDir, signal }
+		);
+		if (selectedDiff.code !== 0) {
+			throw new Error(`Failed to prepare selected files: ${selectedDiff.stderr}`);
+		}
+
+		const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-smart-commit-"));
+		const temporaryIndex = join(temporaryDirectory, "index");
+		const selectedPatch = join(temporaryDirectory, "selected.patch");
+
+		try {
+			const readTreeResult = await execGitWithIndex(
+				headResult.code === 0 ? ["read-tree", "HEAD"] : ["read-tree", "--empty"],
+				repoDir,
+				temporaryIndex,
+				signal
+			);
+			if (readTreeResult.code !== 0) {
+				throw new Error(`Failed to prepare temporary index: ${readTreeResult.stderr}`);
+			}
+
+			if (selectedDiff.stdout) {
+				await writeFile(selectedPatch, selectedDiff.stdout);
+				const applyResult = await execGitWithIndex(
+					["apply", "--cached", "--binary", selectedPatch],
+					repoDir,
+					temporaryIndex,
+					signal
+				);
+				if (applyResult.code !== 0) {
+					throw new Error(`Failed to prepare selected files: ${applyResult.stderr}`);
+				}
+			}
+
+			const commitResult = await execGitWithIndex(["commit", "-m", message], repoDir, temporaryIndex, signal);
+			if (commitResult.code !== 0) {
+				throw new Error(`Commit failed: ${commitResult.stderr}`);
+			}
+
+			// Hooks may update selected entries in the temporary index. Match those entries in the
+			// real index to the new commit while leaving unrelated staged entries untouched.
+			const resetResult = await pi.exec("git", ["reset", "--quiet", "HEAD", "--", ...paths], {
+				cwd: repoDir,
+			});
+			if (resetResult.code !== 0) {
+				throw new Error(`Commit succeeded but failed to refresh the index: ${resetResult.stderr}`);
+			}
+		} finally {
+			await rm(temporaryDirectory, { recursive: true, force: true });
 		}
 	}
+}
+
+function execGitWithIndex(
+	args: string[],
+	cwd: string,
+	indexPath: string,
+	signal: AbortSignal | undefined
+): Promise<{ code: number; stdout: string; stderr: string }> {
+	return new Promise((resolveResult) => {
+		execFile(
+			"git",
+			args,
+			{
+				cwd,
+				encoding: "utf8",
+				env: { ...process.env, GIT_INDEX_FILE: indexPath },
+				signal,
+			},
+			(error, stdout, stderr) => {
+				resolveResult({
+					code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+					stdout,
+					stderr: stderr || error?.message || "",
+				});
+			}
+		);
+	});
 }

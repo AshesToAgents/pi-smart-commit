@@ -16,6 +16,7 @@
     "typescript": "^5.8.0"
   },
   "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   }
 }
