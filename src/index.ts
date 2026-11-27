@@ -5,6 +5,9 @@
  * Before committing:
  *   1. Shows the proposed commit message in an editor for the user to adjust
  *   2. Save to commit, Escape to skip
+ *
+ * The user can disable the review step for the current session with `/commit-approval allow`.
+ * The mode is in-memory only, so it resets whenever extensions reload (new/resumed session).
  */
 
 import { execFile } from "node:child_process";
@@ -15,6 +18,23 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
+	type ApprovalMode = "ask" | "allow";
+
+	// Session-scoped, in-memory only. Intentionally not a tool parameter so the model cannot bypass review.
+	let approvalMode: ApprovalMode = "ask";
+
+	const STATUS_KEY = "smart-commit";
+	const APPROVAL_ARGS = ["allow", "ask", "status"];
+	const describeApprovalMode = (mode: ApprovalMode) =>
+		mode === "allow"
+			? "allow — commits are made without review this session."
+			: "ask — every commit is reviewed before it happens.";
+
+	async function shortHash(repoDir: string, signal: AbortSignal | undefined) {
+		const hashResult = await pi.exec("git", ["rev-parse", "--short", "HEAD"], { cwd: repoDir, signal });
+		return hashResult.stdout.trim();
+	}
+
 	pi.registerTool({
 		name: "commit",
 		label: "Commit",
@@ -78,16 +98,27 @@ export default function (pi: ExtensionAPI) {
 			const stagedDiff = await pi.exec("git", ["diff", "--cached", "--stat"], { cwd: repoDir, signal });
 			const diffSummary = [stagedDiff.stdout.trim(), diffResult.stdout.trim()].filter(Boolean).join("\n");
 
-			if (!ctx.hasUI) {
-				// Non-interactive: commit with co-author trailer
+			// Review is required only in interactive sessions where the user has not opted out.
+			const autoApproved = ctx.hasUI && approvalMode === "allow";
+			const needsReview = ctx.hasUI && !autoApproved;
+
+			if (!needsReview) {
+				// Non-interactive or user-approved: commit with co-author trailer, no editor
 				const modelName = ctx.model?.name ?? "unknown model";
 				const fullMessage = `${params.message}\n\nCo-authored-by: ${modelName}`;
 				await stageAndCommit(fullMessage, params.paths, repoDir, signal);
+				const hash = await shortHash(repoDir, signal);
+				const location = isDefaultRepo ? "" : ` in ${repoDir}`;
+
+				pi.events.emit("smart-commit:committed", { toolCallId, hash, message: fullMessage, repo: repoDir, autoApproved });
 				return {
 					content: [
-						{ type: "text", text: `Committed${isDefaultRepo ? "" : ` in ${repoDir}`}: ${params.message}` },
+						{
+							type: "text",
+							text: `Committed ${hash}${location}${autoApproved ? " (auto-approved, no review)" : ""}: ${params.message}`,
+						},
 					],
-					details: { committed: true, message: fullMessage, repo: repoDir },
+					details: { committed: true, hash, message: fullMessage, repo: repoDir, autoApproved },
 				};
 			}
 
@@ -112,14 +143,47 @@ export default function (pi: ExtensionAPI) {
 			await stageAndCommit(finalMessage, params.paths, repoDir, signal);
 
 			// Get the short hash for the result
-			const hashResult = await pi.exec("git", ["rev-parse", "--short", "HEAD"], { cwd: repoDir, signal });
-			const hash = hashResult.stdout.trim();
+			const hash = await shortHash(repoDir, signal);
 
-			pi.events.emit("smart-commit:committed", { toolCallId, hash, message: finalMessage, repo: repoDir });
+			pi.events.emit("smart-commit:committed", { toolCallId, hash, message: finalMessage, repo: repoDir, autoApproved: false });
 			return {
 				content: [{ type: "text", text: `Committed ${hash}${isDefaultRepo ? "" : ` in ${repoDir}`}` }],
 				details: { committed: true, hash, repo: repoDir },
 			};
+		},
+	});
+
+	pi.registerCommand("commit-approval", {
+		description: "Toggle commit review for this session: ask (default), allow (commit without review), or status",
+		getArgumentCompletions(prefix) {
+			const matches = APPROVAL_ARGS.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
+			return matches.length > 0 ? matches : null;
+		},
+		async handler(args, ctx) {
+			const arg = args.trim();
+			if (arg === "status") {
+				ctx.ui.notify(`Commit approval: ${describeApprovalMode(approvalMode)}`, "info");
+				return;
+			}
+
+			const next: ApprovalMode = arg === "" ? (approvalMode === "ask" ? "allow" : "ask") : (arg as ApprovalMode);
+			if (next !== "ask" && next !== "allow") {
+				ctx.ui.notify(`Unknown commit approval mode '${arg}'. Use ask, allow, or status.`, "error");
+				return;
+			}
+
+			const previous = approvalMode;
+			approvalMode = next;
+
+			// Keep the bypass visible in the footer for as long as it is active.
+			ctx.ui.setStatus(
+				STATUS_KEY,
+				approvalMode === "allow" ? "commits: auto-approved (/commit-approval ask to restore review)" : undefined
+			);
+			ctx.ui.notify(`Commit approval: ${describeApprovalMode(approvalMode)}`, "info");
+			if (previous !== approvalMode) {
+				pi.events.emit("smart-commit:approval-changed", { mode: approvalMode, previous });
+			}
 		},
 	});
 

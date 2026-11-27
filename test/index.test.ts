@@ -30,11 +30,22 @@ async function createRepository() {
 	return repo;
 }
 
-function registerCommitTool() {
+type ExtensionHarness = {
+	tool: any;
+	commands: Map<string, any>;
+	events: Array<{ event: string; payload: any }>;
+};
+
+function createExtension(): ExtensionHarness {
 	let tool: any;
+	const commands = new Map<string, any>();
+	const events: Array<{ event: string; payload: any }> = [];
 	const pi = {
 		registerTool(registeredTool: any) {
 			tool = registeredTool;
+		},
+		registerCommand(name: string, command: any) {
+			commands.set(name, command);
 		},
 		exec: async (command: string, args: string[], options: { cwd?: string }) => {
 			try {
@@ -51,11 +62,42 @@ function registerCommitTool() {
 				};
 			}
 		},
-		events: { emit() {} },
+		events: {
+			emit(event: string, payload: any) {
+			events.push({ event, payload });
+		},
+	},
 	};
 
 	smartCommit(pi as any);
-	return tool;
+	return { tool, commands, events };
+}
+
+function registerCommitTool() {
+	return createExtension().tool;
+}
+
+function createUiContext(options: { editedMessage?: string } = {}) {
+	const editorCalls: string[] = [];
+	const statuses: Array<[string, string]> = [];
+	const notifications: Array<[string, string]> = [];
+	const ctx = {
+		hasUI: true,
+		model: { name: "test-model" },
+		ui: {
+			async editor(title: string) {
+				editorCalls.push(title);
+				return options.editedMessage;
+			},
+			setStatus(key: string, text: string) {
+				statuses.push([key, text]);
+			},
+			notify(text: string, level: string) {
+				notifications.push([text, level]);
+			},
+		},
+	};
+	return { ctx, editorCalls, statuses, notifications };
 }
 
 test("commits only selected paths while preserving unrelated staged changes", async () => {
@@ -218,4 +260,122 @@ test("commits a selected pre-staged deletion without committing unrelated staged
 	} finally {
 		await rm(repo, { recursive: true, force: true });
 	}
+});
+
+test("asks for review by default and skips the commit when the user cancels", async () => {
+	const repo = await createRepository();
+
+	try {
+		await writeFile(join(repo, "selected.txt"), "selected change\n");
+		const headBefore = (await git(repo, "rev-parse", "HEAD")).stdout;
+
+		const { tool } = createExtension();
+		const ui = createUiContext({ editedMessage: undefined });
+		const result = await tool.execute(
+			"test-call",
+			{ message: "Commit selected file", paths: ["selected.txt"], repo },
+			undefined,
+			undefined,
+			ui.ctx,
+		);
+
+		assert.equal(ui.editorCalls.length, 1);
+		assert.match(ui.editorCalls[0], /selected\.txt\s+\|/);
+		assert.equal(result.details.skipped, true);
+		assert.equal((await git(repo, "rev-parse", "HEAD")).stdout, headBefore);
+	} finally {
+		await rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("commits without review once approval is set to allow", async () => {
+	const repo = await createRepository();
+
+	try {
+		await writeFile(join(repo, "selected.txt"), "selected change\n");
+
+		const { tool, commands, events } = createExtension();
+		const commandUi = createUiContext();
+		await commands.get("commit-approval").handler("allow", commandUi.ctx);
+
+		assert.deepEqual(commandUi.notifications, [["Commit approval: allow — commits are made without review this session.", "info"]]);
+		assert.deepEqual(commandUi.statuses, [["smart-commit", "commits: auto-approved (/commit-approval ask to restore review)"]]);
+		assert.deepEqual(events, [
+			{ event: "smart-commit:approval-changed", payload: { mode: "allow", previous: "ask" } },
+		]);
+
+		const ui = createUiContext({ editedMessage: "SHOULD NOT BE USED" });
+		const result = await tool.execute(
+			"test-call",
+			{ message: "Commit selected file", paths: ["selected.txt"], repo },
+			undefined,
+			undefined,
+			ui.ctx,
+		);
+
+		assert.equal(ui.editorCalls.length, 0);
+		assert.equal(result.details.committed, true);
+		assert.equal(result.details.autoApproved, true);
+		assert.equal((await git(repo, "show", "-s", "--format=%s", "HEAD")).stdout.trim(), "Commit selected file");
+		assert.equal((await git(repo, "show", "-s", "--format=%b", "HEAD")).stdout.trim(), "Co-authored-by: test-model");
+	} finally {
+		await rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("toggles commit approval and reports the mode without changing it", async () => {
+	const repo = await createRepository();
+
+	try {
+		await writeFile(join(repo, "selected.txt"), "selected change\n");
+
+		const { tool, commands, events } = createExtension();
+		const approval = commands.get("commit-approval");
+		assert.deepEqual(
+			approval.getArgumentCompletions("a").map((item: any) => item.value),
+			["allow", "ask"],
+		);
+
+		const ui = createUiContext();
+		await approval.handler("", ui.ctx);
+		await approval.handler("status", ui.ctx);
+		await approval.handler("", ui.ctx);
+
+		assert.deepEqual(ui.notifications, [
+			["Commit approval: allow — commits are made without review this session.", "info"],
+			["Commit approval: allow — commits are made without review this session.", "info"],
+			["Commit approval: ask — every commit is reviewed before it happens.", "info"],
+		]);
+		assert.deepEqual(ui.statuses, [
+			["smart-commit", "commits: auto-approved (/commit-approval ask to restore review)"],
+			["smart-commit", undefined],
+		]);
+		assert.deepEqual(events, [
+			{ event: "smart-commit:approval-changed", payload: { mode: "allow", previous: "ask" } },
+			{ event: "smart-commit:approval-changed", payload: { mode: "ask", previous: "allow" } },
+		]);
+
+		// Back in ask mode, review is required again.
+		const reviewUi = createUiContext({ editedMessage: undefined });
+		const result = await tool.execute(
+			"test-call",
+			{ message: "Commit selected file", paths: ["selected.txt"], repo },
+			undefined,
+			undefined,
+			reviewUi.ctx,
+		);
+		assert.equal(reviewUi.editorCalls.length, 1);
+		assert.equal(result.details.reason, "user");
+	} finally {
+		await rm(repo, { recursive: true, force: true });
+	}
+});
+
+test("rejects an unknown commit approval mode", async () => {
+	const { commands } = createExtension();
+	const ui = createUiContext();
+
+	await commands.get("commit-approval").handler("yolo", ui.ctx);
+
+	assert.deepEqual(ui.notifications, [["Unknown commit approval mode 'yolo'. Use ask, allow, or status.", "error"]]);
 });

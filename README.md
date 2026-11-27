@@ -20,6 +20,7 @@ pi -e ssh://git@github.com/AshesToAgents/pi-smart-commit.git
 | Type | Name | Description |
 |------|------|-------------|
 | Tool | `commit` | User-reviewed commits with diff summary and editor prompt |
+| Command | `/commit-approval` | Toggle commit review for the current session |
 
 ## Usage
 
@@ -27,6 +28,19 @@ When the agent wants to commit changes, this tool opens an editor with the propo
 
 - **Save** to commit with the (possibly edited) message
 - **Escape / close** to skip the commit entirely
+
+### Skipping review
+
+To let commits go through without the editor for the rest of the session:
+
+```
+/commit-approval            # toggle between ask and allow
+/commit-approval allow      # commit without review
+/commit-approval ask        # restore review (default)
+/commit-approval status     # show the current mode
+```
+
+While active, the footer shows `commits: auto-approved` and each commit result is marked `auto-approved`. The mode is in-memory only: it resets to `ask` on `/reload`, `/new`, `/resume`, or `/fork`. It is a user command only — there is no tool parameter, so the model cannot enable it.
 
 Key behaviors:
 
@@ -48,7 +62,7 @@ The extension registers a `commit` tool that shadows pi's built-in one. When inv
 4. Opens a text editor with the proposed message and diff summary.
 5. On save, stages the specified files and commits. On cancel, returns a skip message.
 
-In non-interactive contexts (no UI available), it stages and commits directly without the editor step.
+When review is disabled (`/commit-approval allow`) or in non-interactive contexts (no UI available), it stages and commits directly without the editor step.
 
 ## Development
 
